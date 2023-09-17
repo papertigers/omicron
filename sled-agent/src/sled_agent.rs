@@ -346,21 +346,46 @@ impl SledAgent {
             storage.zone_bundler().clone(),
         )?;
 
-        match config.vmm_reservoir_percentage {
-            Some(sz) if sz > 0 && sz < 100 => {
-                instances.set_reservoir_size(&hardware, sz).map_err(|e| {
-                    error!(log, "Failed to set VMM reservoir size: {e}");
-                    e
-                })?;
-            }
-            Some(sz) if sz == 0 => {
+        // Configure the VMM reservoir as either a percentage of DRAM or as an
+        // exact size in MiB.
+        match (config.vmm_reservoir_percentage, config.vmm_reservoir_size_mb) {
+            (None, None) => warn!(log, "Not using VMM reservoir"),
+            (Some(_), Some(_)) => panic!(
+                "cannot specify \
+                vmm_reservoir_percentage and vmm_reservoir_size_mb \
+                at the same time"
+            ),
+            _ => (),
+        }
+        if let Some(sz) = config.vmm_reservoir_percentage {
+            if sz > 0 && sz < 100 {
+                instances.set_reservoir_percentage(&hardware, sz).map_err(
+                    |e| {
+                        error!(log, "Failed to set VMM reservoir size: {e}");
+                        e
+                    },
+                )?;
+            } else if sz == 0 {
                 warn!(log, "Not using VMM reservoir (size 0 bytes requested)");
-            }
-            None => {
-                warn!(log, "Not using VMM reservoir");
-            }
-            Some(sz) => {
+            } else {
                 panic!("invalid requested VMM reservoir percentage: {}", sz);
+            }
+        }
+        if let Some(mb) = config.vmm_reservoir_size_mb {
+            use omicron_common::api::external::ByteCount;
+
+            let bytes = ByteCount::from_mebibytes_u32(mb).to_bytes();
+            if mb > 0 && bytes < hardware.usable_physical_ram_bytes() {
+                instances.set_reservoir_size(&hardware, bytes).map_err(
+                    |e| {
+                        error!(log, "Failed to set VMM reservoir size: {e}");
+                        e
+                    },
+                )?;
+            } else if mb == 0 {
+                warn!(log, "Not using VMM reservoir (size 0 MiB requested)");
+            } else {
+                panic!("invalid requested VMM reservoir size: {mb} MiB");
             }
         }
 

@@ -100,7 +100,7 @@ impl InstanceManager {
     /// Sets the VMM reservoir size to the requested (nonzero) percentage of
     /// usable physical RAM, rounded down to nearest aligned size required by
     /// the control plane.
-    pub fn set_reservoir_size(
+    pub fn set_reservoir_percentage(
         &self,
         hardware: &sled_hardware::HardwareManager,
         target_percent: u8,
@@ -116,14 +116,6 @@ impl InstanceManager {
             .floor() as u64;
         let req_bytes_aligned = vmm_reservoir::align_reservoir_size(req_bytes);
 
-        if req_bytes_aligned == 0 {
-            warn!(
-                self.inner.log,
-                "Requested reservoir size of {} bytes < minimum aligned size of {} bytes",
-                req_bytes, vmm_reservoir::RESERVOIR_SZ_ALIGN);
-            return Ok(());
-        }
-
         // The max ByteCount value is i64::MAX, which is ~8 million TiB. As this
         // value is a percentage of DRAM, constructing this should always work.
         let reservoir_size = ByteCount::try_from(req_bytes_aligned).unwrap();
@@ -136,9 +128,52 @@ impl InstanceManager {
             hardware.usable_physical_ram_bytes(),
             req_bytes,
         );
-        vmm_reservoir::ReservoirControl::set(reservoir_size)?;
 
-        *self.inner.reservoir_size.lock().unwrap() = reservoir_size;
+        self.set_reservoir_common(reservoir_size)
+    }
+
+    /// Sets the VMM reservoir to the requested (nonzero) size in bytes rounded
+    /// down to nearest aligned size required by the control plane.
+    pub fn set_reservoir_size(
+        &self,
+        hardware: &sled_hardware::HardwareManager,
+        req_bytes: u64,
+    ) -> Result<(), Error> {
+        let physical_bytes = hardware.usable_physical_ram_bytes();
+
+        assert!(
+            req_bytes > 0 && req_bytes < physical_bytes,
+            "req_bytes {} must be less than physical memory {}",
+            req_bytes,
+            physical_bytes
+        );
+
+        let byte_size_aligned = vmm_reservoir::align_reservoir_size(req_bytes);
+        // We assert that req_bytes is less than physical_ram_bytes
+        let reservoir_size = ByteCount::try_from(byte_size_aligned).unwrap();
+        info!(
+            self.inner.log,
+            "Setting reservoir size to {} bytes \
+            ({} bytes requested)",
+            reservoir_size,
+            req_bytes,
+        );
+
+        self.set_reservoir_common(reservoir_size)
+    }
+
+    fn set_reservoir_common(&self, byte_count: ByteCount) -> Result<(), Error> {
+        let raw_bytes = byte_count.to_bytes();
+        if raw_bytes == 0 {
+            warn!(
+                self.inner.log,
+                "Requested reservoir size of {} bytes < minimum aligned size of {} bytes",
+                raw_bytes, vmm_reservoir::RESERVOIR_SZ_ALIGN);
+            return Ok(());
+        }
+
+        vmm_reservoir::ReservoirControl::set(byte_count)?;
+        *self.inner.reservoir_size.lock().unwrap() = byte_count;
 
         Ok(())
     }
