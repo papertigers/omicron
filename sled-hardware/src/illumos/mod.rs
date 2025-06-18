@@ -7,7 +7,9 @@ use crate::{DiskFirmware, DiskPaths};
 use camino::Utf8PathBuf;
 use gethostname::gethostname;
 use illumos_devinfo::{DevInfo, DevLinkType, DevLinks, Node, Property};
+use libnvme::controller::NvmeControllerError;
 use libnvme::{Nvme, controller::Controller};
+use libnvme::{NvmeError, NvmeInitError};
 use omicron_common::disk::{DiskIdentity, DiskVariant};
 use sled_hardware_types::Baseboard;
 use slog::Logger;
@@ -81,14 +83,23 @@ enum Error {
 
 #[derive(thiserror::Error, Debug)]
 pub enum DiskPathsError {
-    #[error("Invalid Utf8 path: {0}")]
-    FromPathBuf(#[from] camino::FromPathBufError),
-
     #[error("Failed to access devinfo: {0}")]
     DevInfo(anyhow::Error),
 
+    #[error("Invalid Utf8 path: {0}")]
+    FromPathBuf(#[from] camino::FromPathBufError),
+
     #[error("Could not translate {0} to '/dev' path: no links")]
     NoDevLinks(Utf8PathBuf),
+
+    #[error("libnvme error: {0}")]
+    Nvme(NvmeError),
+
+    #[error("libnvme controller error: {0}")]
+    NvmeController(NvmeControllerError),
+
+    #[error("libnvme init error: {0}")]
+    NvmeInit(NvmeInitError),
 }
 
 const GIMLET_ROOT_NODE_NAME: &str = "Oxide,Gimlet";
@@ -673,8 +684,27 @@ fn poll_device_tree(
 pub(crate) fn find_disk_paths(
     unparsed_disk: &UnparsedDisk,
 ) -> Result<DiskPaths, DiskPathsError> {
-    // XXX Check `nvme_ns_disc_level_t` ?
-    // This will miss potential namespaces otherwise
+    let nvme = Nvme::new().map_err(DiskPathsError::NvmeInit)?;
+    let controller =
+        Controller::init_by_instance(&nvme, unparsed_disk.nvme_instance())
+            .map_err(DiskPathsError::Nvme)?;
+    let controller_locked = controller
+        .write_lock()
+        .map_err(|(_, e)| DiskPathsError::NvmeController(e))?;
+    let controller_info =
+        controller_locked.get_info().map_err(DiskPathsError::NvmeController)?;
+    if controller_info.serial() != unparsed_disk.identity().serial {
+        // XXX Validate that we are operating on the disk that we think we are
+    }
+    let num_of_ns = controller_info.num_namespaces();
+    if num_of_ns != 1 {
+        // TODO: We want to rectify that there is only a single namespace. But
+        // for now we refuse to operate on any disk discovered by the control
+        // plane in an unexpected state.
+
+        // XXX return an error
+    }
+
     let mut devinfo = DevInfo::new().map_err(DiskPathsError::DevInfo)?;
     let blkdev = devinfo.walk_driver("blkdev");
     let found: Vec<_> = blkdev

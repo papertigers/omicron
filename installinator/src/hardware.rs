@@ -46,7 +46,8 @@ impl Hardware {
                 DiskVariant::U2 => {
                     info!(
                         log, "ignoring U.2 disk";
-                        "nvme instance" => "XXX FIXME",
+                        "identity" => ?disk.identity(),
+                        "slot" => %disk.slot(),
                     );
                 }
                 DiskVariant::M2 => {
